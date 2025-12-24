@@ -1,0 +1,967 @@
+---
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r}
+library(quantmod)
+library(tidyverse)
+library(lubridate)
+library(xts)
+library(zoo)
+library(ggplot2)
+library(sandwich)
+library(lmtest)
+
+
+```
+
+#10-yr Treasury Yield [not seasonally adjusted (%)], CPI Index, Crude
+Oil Prices [not seasonally adjusted (\$ per barrel)] #2010-Present
+
+```{r}
+#download data
+getSymbols(
+  Symbols = c("DGS10","CPIAUCSL","DCOILWTICO"), src="FRED", 
+  auto.assign = TRUE, 
+  from = as.Date("2012-01-01")
+  )
+
+#need to fix missing dates and change oil and treasury to average monthly?
+dgs10 = apply.monthly(DGS10, mean, na.rm=TRUE) # in %
+cpi = CPIAUCSL #already monthly
+oil = apply.monthly(DCOILWTICO, mean, na.rm=TRUE) #in $/barrel
+
+index(cpi) = ceiling_date(index(cpi),"month") - days(1)
+index(dgs10) = ceiling_date(index(dgs10), "month") - days(1)
+index(oil) = ceiling_date(index(oil), "month") - days(1)
+
+inflation_mom = diff(log(cpi)) *100
+colnames(inflation_mom) = "inflation_mom"
+
+#final pivot
+# macro = merge(DGS10, DCOILWTICO, CPIAUCSL, join = "inner")
+# 
+# macro_df = macro %>%
+#   data.frame(date=index(macro)) %>%
+#   as_tibble()
+# 
+# macro_long = macro_df %>%
+#   select(date, rate10 = DGS10, oil_price = DCOILWTICO, inflation) %>%
+#   pivot_longer(-date, names_to = "variable", values_to = "value")
+# 
+# ggplot(macro_long, aes(x=date, y=value, color=variable)) +
+#   geom_line(size=0.8) +
+#   facet_wrap(~variable, scales="free_y", ncol=1) +
+#   labs(title="Macro Trends: Interest Rates, Oil Prices, Inflation",
+#        x="Date", y="Value") +
+#   theme_minimal() +
+#   theme(legend.position="none")
+
+##merging macro data
+macro = merge(dgs10, oil, inflation_mom, join = "inner") %>%
+  setNames(c("treasury_10yr", "oil_price", "inflation_mom"))
+```
+
+#Move on to ETFs Info (Renewables vs. Brown Energy)
+
+```{r}
+brown_tickers = c("XLE", "VDE")
+clean_tickers = c("ICLN", "TAN", "QCLN")
+
+
+getSymbols(c(clean_tickers, brown_tickers),
+           src="yahoo", from="2012-01-01", auto.assign = TRUE)
+
+to_mon_ret = function(ticker) {
+  x = get(ticker)
+  periodReturn(Ad(x), period = "monthly", type = "log")   # log returns play nicer in regressions
+}
+
+clean_ret_mat = do.call(merge, lapply(clean_tickers, to_mon_ret))
+
+clean_ret = xts(rowMeans(clean_ret_mat, na.rm = TRUE), order.by = index(clean_ret_mat))
+colnames(clean_ret) = "clean_returns"
+
+brown_ret_mat = do.call(merge, lapply(brown_tickers, to_mon_ret))
+
+brown_ret = xts(rowMeans(brown_ret_mat, na.rm = TRUE), order.by = index(brown_ret_mat))
+colnames(brown_ret) = "brown_returns"
+##month end alignment 
+index(clean_ret) = ceiling_date(index(clean_ret), "month") - days(1)
+index(brown_ret) = ceiling_date(index(brown_ret), "month") - days(1)
+
+relative_ret = clean_ret - brown_ret
+colnames(relative_ret) = "relative_returns"
+
+
+```
+
+#Consolidate macro data and ETF returns
+
+```{r}
+macro$relative_returns = relative_ret
+macro = na.omit(macro)
+head(macro)
+```
+
+#transforming into data frame
+
+```{r}
+macro_df = data.frame(date = as.Date(index(macro)),
+              treasury10 = as.numeric(macro$treasury_10yr),
+              oil_price = as.numeric(macro$oil_price),
+              inflation = as.numeric(macro$inflation_mom),
+              relative_returns = as.numeric(macro$relative_returns)
+)
+
+macro_df$clean_returns = as.numeric(clean_ret[index(macro)])
+macro_df$brown_returns = as.numeric(brown_ret[index(macro)])
+
+head(macro_df)
+
+
+```
+
+#stat summary basic
+
+```{r}
+mean_rel = mean(macro_df$relative_returns)
+sd_rel = sd(macro_df$relative_returns)
+sharpe_rel = mean_rel / sd_rel * sqrt(12)
+
+cat("Start:", min(macro_df$date), "\n")
+
+cat("End:", max(macro_df$date), "\n")
+
+cat("Number of months:", nrow(macro_df), "\n") #188 months
+
+cat("Mean monthly relative return:", mean_rel, "\n") #on average clean energy overperforms brown energy by 0.17% per month ------ (1-0.001699274 )^12 - 1 =-0.02058295 around 2.06% / yr from 2012-2025
+cat("Volatility (SD):", sd_rel, "\n") #relative performance fluctuates very wildly month to month (9.25% monthly volatility)
+cat("Annualized Sharpe (Clean - Brown):", sharpe_rel, "\n") 
+
+
+
+```
+
+```{r}
+
+x1 = macro_df$oil_price
+x2 = macro_df$inflation
+x3 = macro_df$treasury10
+y = macro_df$relative_returns
+
+
+# Pearson
+cat("--- Pearson correlations with relative_returns ---\n")
+cat("Oil price:", cor(y, x1, use = "complete.obs", method = "pearson"), "\n") #\n creates new line
+cat("Inflation:", cor(y, x2, use = "complete.obs", method = "pearson"), "\n")
+cat("10Y rate:", cor(y, x3, use = "complete.obs", method = "pearson"), "\n")
+
+
+# Spearman
+cat("--- Spearman correlations with relative_returns ---\n")
+cat("Oil price:", cor(y, x1, use = "complete.obs", method = "spearman"), "\n")
+cat("Inflation:", cor(y, x2, use = "complete.obs", method = "spearman"), "\n")
+cat("10Y rate:", cor(y, x3, use = "complete.obs", method = "spearman"), "\n")
+
+
+#oil prices increase, brown energy rally bc higher profit margins? for fossil fuel stakeholders
+#inflation increase, Renewables are CAPITAL-INTENSIVE (project finance + governemnt incentives often increases cost of borrowing and costs)
+#rising rate hurt growth stock valuations (long duration growth assets)
+  #fossil fuel companies have short duration and immediate cash flow
+
+```
+
+#regime analysis #idea is to split sample into two groups high and low
+oil months where they are either below or above median #then we would
+compare mean relative returns across groups
+
+```{r}
+#define regimes using median
+#conditional expectation (E[return | regime])
+oil_median = median(macro_df$oil_price, na.rm = TRUE)
+macro_df$oil_regime = ifelse(macro_df$oil_price > oil_median, "High","Low")
+
+#table(macro_df$oil_regime)
+
+#summary
+mean_by_regime = tapply(macro_df$relative_returns,
+                        macro_df$oil_regime,
+                        mean,
+                        na.rm=TRUE
+                        )
+sd_by_regime = tapply(macro_df$relative_returns,
+                          macro_df$oil_regime,
+                        sd,
+                        na.rm=TRUE
+                        )
+sharpe_by_regime = mean_by_regime / sd_by_regime * sqrt(12)
+cat("--- High vs Low Oil pricing Regime stats ---\n")
+cat("mean: ", mean_by_regime,"\n")
+cat("sd:    ", sd_by_regime,"\n")
+cat("sharpe:", sharpe_by_regime, "\n")
+
+#green energy underperforms during high oil prices by 1.63
+#Green performs well during low by only 2.07
+
+#both regimes are volatile, HOWEVER high oil periods are more CHAOTIC
+#high oil price periods include supply shocks, geopolitical stress, OPEC policy/regulation...
+
+
+#
+
+
+```
+
+#Boxplot of Relative Returns by REGIME
+
+```{r}
+boxplot(relative_returns ~ oil_regime,
+        data = macro_df,
+        main = "Relative returns by Oil Regime",
+        xlab = "Oil Regime",
+        ylab = "Monthly Relative Return",
+        col = c("lightblue", "lightpink"))
+abline(h=0, col = "grey")
+        
+
+```
+
+#cumulative performance plots (clean vs brown vs relative)
+
+```{r}
+#basically cumulative return from monthly returns
+
+cumulative_from_simple = function(r) {
+  r_no_na = ifelse(is.na(r), 0, r)
+  cumprod(1 + r_no_na) - 1
+}
+
+clean_cumulative = cumulative_from_simple(macro_df$clean_returns)
+
+brown_cumulative = cumulative_from_simple(macro_df$brown_returns)
+
+rel_cumulative = cumulative_from_simple(macro_df$relative_returns)
+
+plot(macro_df$date, clean_cumulative,
+     type = "l", col = "blue", lwd = 1.5,
+     xlab = "Date", ylab = "Cumulative Return",
+     main = "Cumulative Performance: Clean v Brown")
+lines(macro_df$date, brown_cumulative, col = "red", lwd = 1.5)
+legend("bottomleft",
+       legend = c("Clean", "Brown"),
+       col    = c("blue", "red"),
+       lty    = 5, bty = "n")
+abline(h = 0, col = "grey")
+
+plot(macro_df$date, rel_cumulative,
+     type = "l", col = "darkgreen", lwd = 2,
+     xlab = "Date", ylab = "Cumulative return",
+     main = "Cumulative performance: Clean - Brown")
+abline(h = 0, col = "grey")
+
+```
+
+#Rolling 12-mo Sharpe Ratio of Relative Returns
+
+```{r}
+#concepts: rolling window = compute stats over Last N months
+#Sharpe ratio = mean/SD in that window * sqrt12
+
+rolling_mean_12 = rollapply(macro_df$relative_returns,
+                            width = 12, FUN = mean,
+                            by = 1, align = "right",
+                            fill = NA, na.rm = TRUE
+                            )
+rolling_sd_12 = rollapply(macro_df$relative_returns,
+                            width = 12, FUN = sd,
+                            by = 1, align = "right",
+                            fill = NA, na.rm = TRUE
+                            )
+rolling_sharpe_12 = rolling_mean_12 / rolling_sd_12 * sqrt(12)
+
+plot(macro_df$date, rolling_sharpe_12,
+     type = "l", lwd = 2, col = "darkgreen",
+     xlab = "Date", ylab = "Rolling Sharpe",
+     main = "Rolling 12-Month Sharpe (Clean - Brown)"
+     )
+abline(h=0, col="black", lwd = 2)
+
+
+```
+
+###----Simple Linear Regression + Adding Momentum \##
+
+```{r}
+#Using past macro data to explain current returns...
+
+#Adding 3m and 6m momentum factors earlier for easier 
+relative_momentum_3m = rollapply(macro_df$relative_returns,
+                            width = 3, FUN = mean,
+                            by = 1, align = "right",
+                            fill = NA, na.rm = TRUE
+                            )
+relative_momentum_6m = rollapply(macro_df$relative_returns,
+                            width = 6, FUN = mean,
+                            by = 1, align = "right",
+                            fill = NA, na.rm = TRUE
+                            )
+
+
+
+lag1 = function(x) c(NA, x[-length(x)])
+
+
+
+regression_df = data.frame(
+  date = macro_df$date,
+  relative_returns = macro_df$relative_returns,
+  oil_price_lag1 = lag1(macro_df$oil_price),
+  inflation_lag1 = lag1(macro_df$inflation),
+  treasury10_lag1 = lag1(macro_df$treasury10),
+  relative_momentum_3m = lag1(relative_momentum_3m),
+  relative_momentum_6m = lag1(relative_momentum_6m)
+) %>% 
+  na.omit()
+
+head(regression_df)
+
+
+```
+
+#Basic Regression w/ lag 1 base macro factors
+
+```{r}
+model1 = lm(relative_returns ~ oil_price_lag1 + inflation_lag1 + treasury10_lag1, data = regression_df)
+
+summary(model1)
+```
+
+#Regression with base macro + 3 and 6 mo relative momentum
+
+```{r}
+#rolling means
+
+
+model2 = lm(relative_returns ~ oil_price_lag1 + inflation_lag1 + treasury10_lag1 +relative_momentum_3m + relative_momentum_6m,
+            data = regression_df)
+
+summary(model2)
+#coefficients remain consistent with economic intuition
+#positive momentum coefficients suggests that recent relative outperformance tends to persist
+
+#though, none f the predictors are statistically significant.
+
+#Can suggest that clean-brown performance are influenced by macro effects thru regime shifts than month to month linear predictability.
+
+```
+
+#Next to make inference more robust? HAC/Newey West standard errors #NW
+adjusts standard errors so p-values are more reliable
+
+#testing for heteroskedasticity and autocorrelation
+
+```{r}
+#sanity check
+dwtest(model2)
+bgtest(model2, order=6)
+bptest(model2)
+
+
+#cant reject null for each test, no need for newey west adjustments
+```
+
+#classification #datas setup
+
+```{r}
+#building classification dataset
+regression_df = regression_df[order(regression_df$date),]
+
+#create binary target for relative return of next month
+target_next = c(regression_df$relative_returns[-1] > 0, NA)
+
+classification_df = regression_df
+classification_df$target_next = target_next
+classification_df = classification_df[!is.na(classification_df$target_next), ] #drop last row (there is no next month target)
+
+
+```
+
+#logistic regression (walk-forward)
+
+```{r}
+feature_cols = c("oil_price_lag1",
+                  "inflation_lag1",
+                  "treasury10_lag1",
+                  "relative_momentum_3m",
+                  "relative_momentum_6m")
+
+#column of logit probabilities
+
+n= nrow(classification_df)
+
+logit_prob = rep(NA_real_, n)
+
+start_oos = 36 
+
+#walk forward loop
+
+for (i in start_oos:(n-1)) {
+  train_rows = 1:i
+  test_row = i + 1
+  
+  train_data =  classification_df[train_rows, c("target_next", feature_cols)] #train rows are based on target and features
+  test_data = classification_df[test_row, feature_cols, drop=FALSE] #predict based on features only
+  
+  logistic_model = glm( target_next ~., data = train_data, family = binomial()
+                        ) #fit the model
+  
+  logit_prob[test_row] = predict(logistic_model, newdata = test_data, type = "response") #predict prob next month
+   
+  
+}
+
+classification_df$logit_prob = logit_prob
+
+#check classification accuracy
+oos_index = (start_oos + 1):n
+prediction_label = logit_prob[oos_index] > 0.5
+actual_label = classification_df$target_next[oos_index]
+logistic_accuracy = mean(prediction_label == actual_label, na.rm=TRUE)
+
+logistic_accuracy
+#0.4710744
+
+
+```
+
+#regime, momentum, probability signals
+
+```{r}
+#regime signal setup
+classification_df$oil_price = macro_df$oil_price[match(classification_df$date, macro_df$date)]
+
+macro_signal = ifelse(classification_df$oil_price <= oil_median, 1, 0)
+
+#momentum setup
+momentum3_signal = ifelse(classification_df$relative_momentum_3m > 0, 1, 0)
+momentum6_signal = ifelse(classification_df$relative_momentum_6m > 0, 1, 0)
+
+#logistic probability signal
+#set up confidence of >=0.50
+
+log_signal = ifelse(classification_df$logit_prob >= 0.5, 1, 0)
+
+classification_df$macro_signal = macro_signal
+classification_df$momentum3_signal = momentum3_signal
+classification_df$momentum6_signal = momentum6_signal
+classification_df$log_signal = log_signal
+
+#compile signals into score container
+classification_df$signal_score = classification_df$macro_signal + classification_df$momentum3_signal + classification_df$momentum6_signal +
+  classification_df$log_signal
+
+classification_df$long_clean = ifelse(classification_df$signal_score >= 3, 1, 0)
+
+
+table(classification_df$signal_score)
+table(classification_df$long_clean)
+
+```
+
+#strategy test
+
+```{r}
+#compare benchmark and our strategy
+#strategy is to long only when long_clean = 1
+
+benchmark = classification_df$relative_returns
+
+strategy = classification_df$relative_returns * classification_df$long_clean
+
+
+#we are going to use the cumulative_from_simple function
+
+strategy_cumulative = cumulative_from_simple(strategy)
+
+benchmark_cumulative = cumulative_from_simple(benchmark)
+
+plot(classification_df$date, benchmark_cumulative,
+     type = "l", lwd = 2, col = "blue",
+     xlab ="Date", ylab = "Cumulative Return",
+     main = "Cumulative Performance: Benchmark Always Long vs Long when Signal")
+lines(classification_df$date, strategy_cumulative,
+      col="black", lwd = 2)
+abline(h=0,col="grey")
+legend("topleft",
+       legend = c("Always Long","Signal Based Long"), col = c("blue","black"), lty = 1,bty ="n")
+
+#With strategy that uses atleast 3 score signals
+
+```
+
+#Sharpe Ratios
+
+```{r}
+
+strategy_mean = mean(strategy, na.rm=TRUE)
+strategy_sd = sd(strategy, na.rm=TRUE)
+strategy_sharpe = strategy_mean / strategy_sd *sqrt(12)
+
+benchmark_mean = mean(benchmark, na.rm=TRUE)
+benchmark_sd = sd(benchmark, na.rm=TRUE)
+benchmark_sharpe = benchmark_mean / benchmark_sd *sqrt(12)
+
+
+cat("Strategy Sharpe:", strategy_sharpe, "\n")
+cat("Benchmark Sharpe:", benchmark_sharpe,"\n")
+#strategy sharpe > benchmark sharpe
+
+```
+
+###further improvements? #adding additional possibly useful features
+
+```{r}
+#adding VIX (market volatility indicator; uncertainty may hurt clean performance)
+
+getSymbols("^VIX", src = "yahoo", from = "2012-01-01", auto.assign = TRUE)
+
+vix_daily = Ad(VIX)
+vix = apply.monthly(vix_daily, mean, na.rm = TRUE)
+
+index(vix) = ceiling_date(index(vix), "month") - days(1)
+colnames(vix) = "vix"
+head(vix)
+
+macro = merge(macro, vix, join = "inner")
+macro_df$vix = as.numeric(vix[index(macro)])
+
+vix_lag_full = lag1(macro_df$vix)
+
+regression_df$vix_lag1 = vix_lag_full[match(regression_df$date, macro_df$date)]
+
+
+
+# head(regression_df)
+#adding spy to find out whether spy can favor clean etfs (if market favors growht stocks)
+getSymbols("SPY", src = "yahoo", from = "2012-01-01", auto.assign = TRUE)
+
+spy_return = periodReturn(Ad(SPY), period = "monthly", type = "log")
+
+index(spy_return) = ceiling_date(index(spy_return), "month") -days(1)
+
+macro_df$clean_spy = macro_df$clean_returns - as.numeric(spy_return[index(macro_df$date)])
+
+
+clean_spy_full_lag =  lag1(macro_df$clean_spy)
+
+
+regression_df$clean_spy_lag1 = clean_spy_full_lag[match(regression_df$date, macro_df$date)]
+
+
+#put into classificaiton table
+classification_df$vix_lag1 = regression_df$vix_lag1[match(classification_df$date, regression_df$date)]
+
+classification_df$clean_spy_lag1 = regression_df$clean_spy_lag1[match(classification_df$date, regression_df$date)]
+
+```
+
+#rerun logisitic regression model
+
+```{r}
+feature_cols = c(
+  "oil_price_lag1",
+  "inflation_lag1",
+  "treasury10_lag1",
+  "relative_momentum_3m",
+  "relative_momentum_6m",
+  "vix_lag1",
+  "clean_spy_lag1"
+)
+
+n= nrow(classification_df)
+
+logit_prob = rep(NA_real_, n)
+
+start_oos = 36 
+
+#walk forward loop
+
+for (i in start_oos:(n-1)) {
+  train_rows = 1:i
+  test_row = i + 1
+  
+  train_data =  classification_df[train_rows, c("target_next", feature_cols)] #train rows are based on target and features
+  test_data = classification_df[test_row, feature_cols, drop=FALSE] #predict based on features only
+  
+  logistic_model = glm(target_next ~., data = train_data, family = binomial()
+                        ) #fit the model
+  
+  logit_prob[test_row] = predict(logistic_model, newdata = test_data, type = "response") #predict prob next month
+   
+  
+}
+
+classification_df$logit_prob = logit_prob
+
+oos_index = (start_oos + 1):n
+prediction_label = logit_prob[oos_index] > 0.5
+actual_label = classification_df$target_next[oos_index]
+logistic_accuracy2 = mean(prediction_label == actual_label, na.rm=TRUE)
+
+logistic_accuracy
+logistic_accuracy2
+#close to same figure prior to adding features
+```
+
+#re-evaluate strategy
+
+```{r}
+log_signal = ifelse(classification_df$logit_prob >= 0.5, 1, 0)
+
+classification_df$signal_score = macro_signal + momentum3_signal + momentum6_signal + log_signal
+#consider loosening score variable to 2
+classification_df$long_clean = ifelse(classification_df$signal_score >= 3, 1, 0)
+
+strategy2  = classification_df$relative_returns * classification_df$long_clean
+
+strategy2_cumulative  = cumulative_from_simple(strategy2)
+benchmark_cumulative = cumulative_from_simple(benchmark)
+
+plot(classification_df$date, benchmark_cumulative,
+     type = "l", lwd = 2, col = "blue",
+     xlab ="Date", ylab = "Cumulative Return",
+     main = "Cumulative Performance: Benchmark Always Long vs Long when Signal (New)")
+lines(classification_df$date, strategy2_cumulative,
+      col="black", lwd = 2)
+abline(h=0,col="grey")
+legend("topleft",
+       legend = c("Always Long","Signal Based Long"),
+       col = c("blue","black"), lty = 1,bty ="n")
+strategy2_mean   = mean(strategy2,   na.rm = TRUE)
+strategy2_sd     = sd(strategy2,     na.rm = TRUE)
+strategy2_sharpe = strategy2_mean / strategy2_sd * sqrt(12)
+
+cat("Strategy Sharpe:", strategy_sharpe, "\n")
+cat("Strategy 2 Sharpe:", strategy2_sharpe, "\n")
+cat("Benchmark Sharpe:", benchmark_sharpe, "\n")
+
+#accuracy barely improved, sharpe ratio worsened after feature addition 
+```
+
+#try utilizing xgboost into our model
+
+```{r}
+library(xgboost)
+
+X = as.matrix(classification_df[, feature_cols])
+y = as.numeric(classification_df$target_next)  # 1/0
+n = nrow(X)
+
+xgb_prob = rep(NA_real_, n)
+
+for (i in start_oos:(n - 1)) {
+  train_index = 1:i
+  test_index  = i + 1
+  
+  dtrain = xgb.DMatrix(data = X[train_index,], label = y[train_index])
+  
+  dtest = xgb.DMatrix(data = X[test_index, , drop=FALSE])
+  
+  params = list(
+    objective = "binary:logistic",
+    eta = 0.1,
+    max_depth = 3,
+    subsample = 0.8,
+    colsample_bytree = 0.8,
+    eval_metric = "logloss"
+  )
+  
+  xgb_model = xgb.train(
+    params = params,
+    data = dtrain,
+    nrounds = 100,
+    verbose = 0
+  )
+  xgb_prob[test_index] = predict(xgb_model, newdata = dtest)
+}
+
+classification_df$xgb_prob = xgb_prob
+
+xgb_prediction = classification_df$xgb_prob[oos_index] > 0.5
+actual = classification_df$target_next[oos_index]
+
+xgb_accuracy = mean(xgb_prediction == actual, na.rm = TRUE)
+logistic_accuracy
+logistic_accuracy2
+xgb_accuracy
+
+
+#### testing xgb probabilities
+
+xgb_signal = ifelse(classification_df$xgb_prob >= 0.5, 1, 0)
+
+classification_df$signal_score = macro_signal + momentum3_signal + momentum6_signal + xgb_signal
+#consider loosening score variable to 2
+classification_df$long_clean = ifelse(classification_df$signal_score >= 3, 1, 0)
+
+strategy3  = classification_df$relative_returns * classification_df$long_clean
+
+strategy3_cumulative  = cumulative_from_simple(strategy3)
+# benchmark_cumulative = cumulative_from_simple(benchmark)
+
+plot(classification_df$date, benchmark_cumulative,
+     type = "l", lwd = 2, col = "blue",
+     xlab ="Date", ylab = "Cumulative Return",
+     main = "Cumulative Performance: Benchmark Always Long vs Long when Signal (New)")
+lines(classification_df$date, strategy3_cumulative,
+      col="black", lwd = 2)
+abline(h=0,col="grey")
+legend("topleft",
+       legend = c("Always Long","Signal Based Long"),
+       col = c("blue","black"), lty = 1,bty ="n")
+strategy3_mean   = mean(strategy3,   na.rm = TRUE)
+strategy3_sd     = sd(strategy3,     na.rm = TRUE)
+strategy3_sharpe = strategy3_mean / strategy3_sd * sqrt(12)
+
+cat("Strategy Sharpe:", strategy_sharpe, "\n")
+cat("Strategy 2 Sharpe:", strategy2_sharpe, "\n")
+cat("Strategy 3 Sharpe:", strategy3_sharpe, "\n")
+cat("Benchmark Sharpe:", benchmark_sharpe, "\n")
+#
+```
+#finding best combination of probability threshold and signal score
+
+```{r}
+
+thresholds = seq(0.40, 0.70, by = 0.01)   # prob cutoff for logit signal
+score_cutoffs = 1:4                       # how many signals needed to go long
+
+results = expand.grid(
+  threshold = thresholds,
+  score_cutoff = score_cutoffs)
+
+results$sharpe = NA_real_
+
+results$avg_exposure = NA_real_   # fraction of months in the market
+
+
+for (i in seq_len(nrow(results))) {
+
+  th = results$threshold[i]
+  cut = results$score_cutoff[i]
+
+  # logistic probability signal at this threshold
+  xgb_signal = ifelse(classification_df$xgb_prob >= th, 1, 0)
+
+  # recompute score
+  signal_score = macro_signal +
+                 momentum3_signal +
+                 momentum6_signal +
+                 xgb_signal
+
+  long_clean = ifelse(signal_score >= cut, 1, 0)
+
+  # strategy returns
+  strategy_ret = classification_df$relative_returns * long_clean
+
+  # if sd is zero (e.g. no trades), Sharpe = NA
+  if (sd(strategy_ret, na.rm = TRUE) > 0) {
+    sharpe = mean(strategy_ret, na.rm = TRUE) / sd(strategy_ret, na.rm = TRUE) * sqrt(12)
+  } else {
+    sharpe = NA_real_
+  }
+
+  results$sharpe[i] = sharpe
+  results$avg_exposure[i] = mean(long_clean, na.rm = TRUE)   # % of months in the market
+}
+
+# find best combo by Sharpe
+best_row_index = which.max(results$sharpe)
+best_combo = results[best_row_index, ]
+
+best_combo
+```
+
+#looking at best combination results
+
+```{r}
+
+best_threshold   = best_combo$threshold
+best_score_cut   = best_combo$score_cutoff
+
+
+xgb_signal_best = ifelse(classification_df$xgb_prob >= best_threshold, 1, 0)
+
+classification_df$signal_score_best =
+  macro_signal +
+  momentum3_signal +
+  momentum6_signal +
+  xgb_signal_best
+
+classification_df$long_clean_best =
+  ifelse(classification_df$signal_score_best >= best_score_cut, 1, 0)
+
+# strategy returns with best rule
+strategy_best = classification_df$relative_returns * classification_df$long_clean_best
+
+strategy_best_mean   = mean(strategy_best, na.rm = TRUE)
+strategy_best_sd     = sd(strategy_best,   na.rm = TRUE)
+strategy_best_sharpe = strategy_best_mean / strategy_best_sd * sqrt(12)
+
+cat("Best threshold:", best_threshold, "\n")
+cat("Best score cutoff:", best_score_cut, "\n")
+cat("Best strategy Sharpe:", strategy_best_sharpe, "\n")
+cat("Benchmark Sharpe:", benchmark_sharpe, "\n")   # assuming benchmark_sharpe from before
+
+# cumulative performance plot
+strategy_best_cumulative  = cumulative_from_simple(strategy_best)
+# we already have benchmark_cumulative
+
+plot(classification_df$date, benchmark_cumulative,
+     type = "l", lwd = 2, col = "blue",
+     xlab = "Date", ylab = "Cumulative Return",
+     main = "Benchmark vs Optimized Signal-Based Strategy")
+lines(classification_df$date, strategy_best_cumulative,
+      col = "black", lwd = 2)
+abline(h = 0, col = "grey")
+legend("topleft",
+       legend = c("Always Long", "Signal-Based (Optimized)"),
+       col    = c("blue", "black"),
+       lty    = 1, bty   = "n")
+```
+
+#what does combining both log_prob and xgb_prob as signals maybe as averages
+```{r}
+classification_df$ensemble_prob = rowMeans(
+  cbind(classification_df$logit_prob, classification_df$xgb_prob),
+  na.rm = TRUE
+)
+
+ensemble_threshold = 0.50  
+
+classification_df$ensemble_signal = ifelse(
+  classification_df$ensemble_prob >= ensemble_threshold, 1, 0
+)
+
+classification_df$signal_score_ensemble =
+  macro_signal +
+  momentum3_signal +
+  momentum6_signal +
+  classification_df$ensemble_signal
+
+# Choose a score cutoff – start with 3 like before
+score_cutoff_ensemble = 3
+
+classification_df$long_clean_ensemble = ifelse(
+  classification_df$signal_score_ensemble >= score_cutoff_ensemble, 1, 0
+)
+
+strategy_ret_ensemble = classification_df$relative_returns * classification_df$long_clean_ensemble
+
+
+strategy_cumulative_ensemble = cumulative_from_simple(strategy_ret_ensemble)
+
+
+# Sharpe
+strategy_mean_ensemble   <- mean(strategy_ret_ensemble, na.rm = TRUE)
+strategy_sd_ensemble     <- sd(strategy_ret_ensemble,   na.rm = TRUE)
+strategy_sharpe_ensemble <- strategy_mean_ensemble / strategy_sd_ensemble * sqrt(12)
+
+plot(classification_df$date, benchmark_cumulative,
+     type = "l", lwd = 2, col = "blue",
+     xlab = "Date", ylab = "Cumulative Return",
+     main = "Benchmark vs Optimized Signal-Based Strategy")
+lines(classification_df$date, strategy_cumulative_ensemble,
+      col = "black", lwd = 2)
+abline(h = 0, col = "grey")
+legend("topleft",
+       legend = c("Always Long", "Signal-Based (Ensemble)"),
+       col    = c("blue", "black"),
+       lty    = 1, bty   = "n")
+
+
+strategy_sharpe
+strategy2_sharpe
+strategy3_sharpe
+strategy_sharpe_ensemble
+benchmark_sharpe
+
+#highest sharpe!
+```
+
+
+
+#output to csv for tableau use and learning
+```{r}
+# build returns & cumulative series
+benchmark_ret = classification_df$relative_returns
+strategy_ret_ensemble = classification_df$relative_returns * classification_df$long_clean_ensemble
+
+classification_df$xgb_signal = xgb_signal
+benchmark_cum = cumulative_from_simple(benchmark_ret)
+ensemble_cum  = cumulative_from_simple(strategy_ret_ensemble)
+
+# attach to classification_df with consistent column names
+classification_df <- classification_df %>%
+  mutate(
+    benchmark_ret        = benchmark_ret,
+    strategy_ret_ensemble = strategy_ret_ensemble,
+    benchmark_cumulative  = benchmark_cum,
+    ensemble_cumulative  = ensemble_cum)
+
+tableau_df <- macro_df %>%
+  # keep macro + clean/brown/relative returns
+  select(
+    date,
+    treasury10,
+    oil_price,
+    inflation,
+    clean_returns,
+    brown_returns,
+    relative_returns,
+    vix,
+    clean_spy
+  ) %>%
+  # join modeling/signal info by date
+  left_join(
+    classification_df %>%
+      select(all_of(c(
+        "date",
+        "target_next",
+        "logit_prob",
+        "xgb_prob",
+        "ensemble_prob",
+        "macro_signal",
+        "momentum3_signal",
+        "momentum6_signal",
+        "log_signal",           # logistic binary column
+        "xgb_signal",           # xgb binary column
+        "ensemble_signal",
+        "signal_score_ensemble",
+        "long_clean_ensemble",
+        "benchmark_ret",
+        "strategy_ret_ensemble",
+        "benchmark_cumulative",
+        "ensemble_cumulative"
+      ))),
+    by = "date"
+  )
+
+write.csv(
+  tableau_df,
+  "tableau_clean_vs_brown_framework.csv",
+  row.names = FALSE
+)
+
+```
+
+
+
+
