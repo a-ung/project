@@ -1,0 +1,33 @@
+# R / RStudio
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Mac / Windows junk
+.DS_Store
+Thumbs.db
+
+# Outputs (keep small samples only)
+outputs/
+*.png
+*.html
+*.pdf
+
+# Data (don't commit large/raw unless tiny and necessary)
+data/
+*.csv
+*.xlsx
+*.xls
+*.rds
+
+# Secrets
+.env
+**/*key*
+**/*token*
+
+
+
+
+
+
